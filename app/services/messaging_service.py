@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
 from fastapi import HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.connection import WhatsAppConnection, ConnectionStatus
@@ -14,14 +15,15 @@ from app.repositories.contact_repository import ContactRepository
 from app.repositories.conversation_repository import ConversationRepository
 from app.repositories.message_repository import MessageRepository
 from app.schemas.message import MessageSendRequest
+from app.core.phone import normalize_phone
 from app.workers.queue import enqueue_message_send
 
 logger = logging.getLogger(__name__)
 
 
 def clean_phone_number(raw_phone: str) -> str:
-    """Remove caracteres não-numéricos do telefone."""
-    cleaned = re.sub(r"\D", "", raw_phone)
+    """Normaliza o telefone para apenas dígitos e valida o tamanho."""
+    cleaned = normalize_phone(raw_phone)
     if len(cleaned) < 10 or len(cleaned) > 20:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT if hasattr(status, "HTTP_422_UNPROCESSABLE_CONTENT") else 422,
@@ -108,7 +110,18 @@ class MessagingService:
             idempotency_key=effective_idempotency_key,
             created_at=now
         )
-        saved_message = await self.message_repo.create(db, message)
+        try:
+            saved_message = await self.message_repo.create(db, message)
+        except IntegrityError:
+            await db.rollback()
+            if effective_idempotency_key:
+                existing = await self.message_repo.get_by_idempotency_key(
+                    db, clinic_id, effective_idempotency_key
+                )
+                if existing:
+                    logger.info("Retornando mensagem existente após colisão de concorrência na chave %s", effective_idempotency_key)
+                    return existing
+            raise
 
         # 7. Registra job de processamento
         job = WhatsAppJob(
@@ -142,7 +155,7 @@ class MessagingService:
                     elif "id" in result:
                         provider_msg_id = result.get("id")
 
-                saved_message.status = "sent"
+                saved_message.transition_status_to("sent")
                 saved_message.sent_at = datetime.now(timezone.utc)
                 saved_message.provider_message_id = provider_msg_id
                 job.status = "finished"
@@ -151,7 +164,7 @@ class MessagingService:
                 await db.commit()
             except Exception as exc:
                 logger.error("Falha ao despachar mensagem pelo provedor: %s", exc)
-                saved_message.status = "failed"
+                saved_message.transition_status_to("failed")
                 job.status = "failed"
                 job.last_error = str(exc)[:500]
                 await self.message_repo.update(db, saved_message)

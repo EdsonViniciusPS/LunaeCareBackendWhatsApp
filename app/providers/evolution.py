@@ -54,14 +54,17 @@ class EvolutionProvider(WhatsAppProvider):
             "integration": "WHATSAPP-BAILEYS",
         }
         if webhook_url:
-            payload["webhook"] = webhook_url
-            payload["webhook_by_events"] = False
-            payload["events"] = [
-                "CONNECTION_UPDATE",
-                "MESSAGES_UPSERT",
-                "MESSAGES_UPDATE",
-                "QRCODE_UPDATED"
-            ]
+            payload["webhook"] = {
+                "url": webhook_url,
+                "byEvents": False,
+                "base64": False,
+                "events": [
+                    "CONNECTION_UPDATE",
+                    "MESSAGES_UPSERT",
+                    "MESSAGES_UPDATE",
+                    "QRCODE_UPDATED"
+                ]
+            }
 
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
@@ -79,7 +82,7 @@ class EvolutionProvider(WhatsAppProvider):
                     logger.error("Erro ao criar instância na Evolution API: %s %s", res.status_code, res.text)
                     raise HTTPException(
                         status_code=status.HTTP_502_BAD_GATEWAY,
-                        detail=f"Falha ao provisionar conexão no provedor: {res.text}"
+                        detail="Falha ao provisionar conexão no provedor WhatsApp."
                     )
         except httpx.RequestError as exc:
             logger.error("Falha de conexão com a Evolution API: %s", exc)
@@ -239,6 +242,48 @@ class EvolutionProvider(WhatsAppProvider):
                 )
         except httpx.RequestError as exc:
             logger.error("Falha de conexão ao enviar mensagem: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Provedor WhatsApp temporariamente inacessível."
+            )
+
+    async def set_webhook(
+        self,
+        instance_name: str,
+        webhook_url: str
+    ) -> Dict[str, Any]:
+        if self.mock_mode:
+            if instance_name in self._mock_instances:
+                self._mock_instances[instance_name]["webhook_url"] = webhook_url
+            return {"status": "SUCCESS", "webhook": {"url": webhook_url}}
+
+        payload = {
+            "url": webhook_url,
+            "webhook_by_events": False,
+            "webhookByEvents": False,
+            "events": [
+                "CONNECTION_UPDATE",
+                "MESSAGES_UPSERT",
+                "MESSAGES_UPDATE",
+                "QRCODE_UPDATED"
+            ]
+        }
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                res = await client.post(
+                    f"{self.base_url}/webhook/set/{instance_name}",
+                    json=payload,
+                    headers=self._headers()
+                )
+                if res.status_code in (200, 201):
+                    return res.json()
+                logger.error("Erro ao configurar webhook na Evolution API: %s %s", res.status_code, res.text)
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="Falha ao configurar webhook no provedor WhatsApp."
+                )
+        except httpx.RequestError as exc:
+            logger.error("Falha de conexão com a Evolution API: %s", exc)
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Provedor WhatsApp temporariamente inacessível."

@@ -42,8 +42,9 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql+asyncpg://lunae_user:lunae_password@whatsapp-db:5432/lunaecare_whatsapp"
     DATABASE_SYNC_URL: Optional[str] = None
 
-    # Redis
+    # Redis e Fila
     REDIS_URL: str = "redis://whatsapp-redis:6379/0"
+    SCHEDULER_INTERVAL_SECONDS: int = 60
 
     # Provedor WhatsApp
     WHATSAPP_PROVIDER: str = "evolution"

@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
-from app.core.database import async_session_factory
+from app.core.database import AsyncSessionLocal
 from app.models.connection import WhatsAppConnection, ConnectionStatus
 from app.models.entities import WhatsAppMessage, WhatsAppConversation, WhatsAppContact, WhatsAppJob
 from app.providers import get_whatsapp_provider
@@ -20,7 +20,7 @@ async def execute_send_message(message_id: str, clinic_id: str) -> bool:
     Executa o despacho de uma mensagem enfileirada no provedor WhatsApp.
     Atualiza o estado da mensagem e do respectivo job.
     """
-    async with async_session_factory() as db:
+    async with AsyncSessionLocal() as db:
         # Busca mensagem
         query = (
             select(WhatsAppMessage)
@@ -99,7 +99,7 @@ async def execute_send_message(message_id: str, clinic_id: str) -> bool:
                     provider_msg_id = result.get("id")
 
             now = datetime.now(timezone.utc)
-            message.status = "sent"
+            message.transition_status_to("sent")
             message.sent_at = now
             message.provider_message_id = provider_msg_id
             conversation.last_message_at = now
@@ -115,7 +115,7 @@ async def execute_send_message(message_id: str, clinic_id: str) -> bool:
         except Exception as exc:
             logger.error("Falha ao despachar mensagem %s pelo provedor: %s", message_id, exc)
             now = datetime.now(timezone.utc)
-            message.status = "failed"
+            message.transition_status_to("failed")
             if job:
                 job.status = "failed"
                 job.finished_at = now
@@ -131,9 +131,9 @@ def run_send_message_job(message_id: str, clinic_id: str) -> bool:
     return asyncio.run(execute_send_message(message_id, clinic_id))
 
 
-async def execute_process_due_jobs() -> int:
+async def execute_process_due_jobs(clinic_id: Optional[str] = None) -> int:
     """
-    Processa todos os lembretes agendados pendentes.
+    Processa lembretes agendados pendentes (geral ou filtrado por clínica).
     """
     from app.services.scheduling_service import SchedulingService
     from app.repositories.automation_repository import AutomationRepository
@@ -146,7 +146,7 @@ async def execute_process_due_jobs() -> int:
     from app.services.messaging_service import MessagingService
     from app.providers import get_whatsapp_provider
 
-    async with async_session_factory() as db:
+    async with AsyncSessionLocal() as db:
         automation_repo = AutomationRepository()
         job_repo = JobRepository()
         contact_repo = ContactRepository()
@@ -165,9 +165,9 @@ async def execute_process_due_jobs() -> int:
             consent_service=consent_service,
             messaging_service=messaging_service
         )
-        results = await service.process_due_jobs(db)
+        results = await service.process_due_jobs(db, clinic_id=clinic_id)
         return len(results)
 
 
-def run_process_due_jobs() -> int:
-    return asyncio.run(execute_process_due_jobs())
+def run_process_due_jobs(clinic_id: Optional[str] = None) -> int:
+    return asyncio.run(execute_process_due_jobs(clinic_id=clinic_id))

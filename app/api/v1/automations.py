@@ -1,3 +1,4 @@
+import hmac
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -169,7 +170,7 @@ async def receive_agenda_event(
 ) -> Dict[str, Any]:
     # Suporta autenticação tanto via token interno de microsserviço quanto via JWT Bearer
     clinic_id: Optional[str] = None
-    if x_internal_token and x_internal_token == settings.INTERNAL_API_KEY:
+    if x_internal_token and hmac.compare_digest(x_internal_token, settings.INTERNAL_API_KEY):
         clinic_id = event.clinic_id
         if not clinic_id:
             raise HTTPException(
@@ -196,31 +197,41 @@ async def receive_agenda_event(
 @router.post(
     "/process-due-jobs",
     summary="Processar lembretes agendados pendentes",
-    description="Dispara o envio de todos os lembretes cujo horário agendado já chegou (scheduled_at <= now), validando opt-out."
+    description="Dispara o envio de lembretes cujo horário agendado chegou (scheduled_at <= now), validando opt-out. Restrito a chamadas internas ou com escopo estrito à clínica autenticada."
 )
 async def process_due_jobs_endpoint(
+    clinic_id: Optional[str] = Query(default=None, description="Filtrar por clínica específica (permitido apenas para token interno)"),
     x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
     authorization: Optional[str] = Header(default=None, alias="Authorization"),
     db: AsyncSession = Depends(get_db),
     service: SchedulingService = Depends(get_scheduling_service),
 ) -> Dict[str, Any]:
-    # Proteção de acesso
-    is_valid = False
-    if x_internal_token and x_internal_token == settings.INTERNAL_API_KEY:
-        is_valid = True
+    target_clinic_id: Optional[str] = None
+
+    # 1. Autenticação interna de sistema (ex: cron ou worker periódico)
+    if x_internal_token and hmac.compare_digest(x_internal_token, settings.INTERNAL_API_KEY):
+        target_clinic_id = clinic_id
+    # 2. Autenticação via JWT Bearer (escopo estritamente restrito à clínica do token)
     elif authorization and authorization.startswith("Bearer "):
         from app.core.security import decode_access_token
         try:
-            decode_access_token(authorization.split(" ", 1)[1])
-            is_valid = True
+            claims = decode_access_token(authorization.split(" ", 1)[1])
+            target_clinic_id = claims.get(settings.JWT_CLINIC_CLAIM)
+            if not target_clinic_id:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Token sem clínica autorizada.")
+        except HTTPException:
+            raise
         except Exception:
-            pass
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido.")
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Não autorizado. Forneça o header X-Internal-Token ou token de autorização Bearer."
+        )
 
-    if not is_valid:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Não autorizado.")
-
-    processed = await service.process_due_jobs(db)
+    processed = await service.process_due_jobs(db, clinic_id=target_clinic_id)
     return {
         "processed_count": len(processed),
+        "clinic_id": target_clinic_id,
         "results": processed
     }

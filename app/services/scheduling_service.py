@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.phone import normalize_phone
 from app.models.entities import WhatsAppAutomationRule, WhatsAppJob
 from app.repositories.automation_repository import AutomationRepository
 from app.repositories.contact_repository import ContactRepository
@@ -138,6 +139,7 @@ class SchedulingService:
         """
         Recebe e processa eventos da agenda Lunae Care (created, rescheduled, cancelled).
         """
+        clean_phone = normalize_phone(event.phone_number)
         apt_dt = event.appointment_datetime
         context = {
             "patient_name": event.patient_name,
@@ -165,7 +167,7 @@ class SchedulingService:
                     clinic_id=clinic_id,
                     request=MessageSendRequest(
                         connection_id=cancel_rule.connection_id,
-                        recipient=event.phone_number,
+                        recipient=clean_phone,
                         content=content,
                         idempotency_key=f"cancel_{event.appointment_id}"
                     )
@@ -194,7 +196,7 @@ class SchedulingService:
                 clinic_id=clinic_id,
                 request=MessageSendRequest(
                     connection_id=created_rule.connection_id,
-                    recipient=event.phone_number,
+                    recipient=clean_phone,
                     content=content,
                     idempotency_key=f"created_{event.appointment_id}"
                 )
@@ -213,8 +215,9 @@ class SchedulingService:
             reminder_time = apt_dt - timedelta(hours=hours_before)
             now = datetime.now(timezone.utc)
 
-            # Se o lembrete ainda estiver no futuro, agenda o job
-            if reminder_time > now:
+            # Se a consulta estiver no futuro, agenda o job (se o tempo de antecedência já passou, agenda para envio imediato)
+            if apt_dt > now:
+                scheduled_time = max(reminder_time, now)
                 job = WhatsAppJob(
                     id=str(uuid.uuid4()),
                     clinic_id=clinic_id,
@@ -222,10 +225,11 @@ class SchedulingService:
                     appointment_id=event.appointment_id,
                     job_type="appointment_reminder_24h",
                     status="pending",
-                    scheduled_at=reminder_time,
+                    scheduled_at=scheduled_time,
                     payload={
                         "rule_id": reminder_rule.id,
-                        "recipient": event.phone_number,
+                        "recipient": clean_phone,
+                        "phone_number": clean_phone,
                         "patient_name": event.patient_name,
                         "professional_name": event.professional_name,
                         "appointment_date": apt_dt.strftime("%d/%m/%Y"),
@@ -250,25 +254,29 @@ class SchedulingService:
     async def process_due_jobs(
         self,
         db: AsyncSession,
+        clinic_id: Optional[str] = None,
         reference_time: Optional[datetime] = None
     ) -> List[Dict[str, Any]]:
         """
         Executa os lembretes pendentes cujo horário agendado chegou (scheduled_at <= now).
+        Se clinic_id for informado, filtra exclusivamente os jobs daquela clínica.
         Verifica consentimento e opt-out antes de enviar cada mensagem.
         """
-        due_jobs = await self.job_repo.get_due_jobs(db, reference_time=reference_time)
+        due_jobs = await self.job_repo.get_due_jobs(db, clinic_id=clinic_id, reference_time=reference_time)
         results = []
 
         for job in due_jobs:
             payload = job.payload or {}
-            recipient = payload.get("recipient")
+            raw_recipient = payload.get("recipient") or payload.get("phone_number")
             clinic_id = job.clinic_id
 
-            if not recipient:
+            if not raw_recipient:
                 job.status = "failed"
                 job.last_error = "Payload sem recipient"
                 await self.job_repo.update(db, job)
                 continue
+
+            recipient = normalize_phone(raw_recipient)
 
             # Verifica se o paciente solicitou opt-out
             contact = await self.contact_repo.get_by_phone(db, clinic_id, recipient)

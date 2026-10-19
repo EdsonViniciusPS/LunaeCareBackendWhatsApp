@@ -1,6 +1,7 @@
 import uuid
 from typing import Optional
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.entities import WhatsAppContact
@@ -61,6 +62,13 @@ class ContactRepository:
             patient_id=patient_id
         )
         db.add(new_contact)
-        await db.commit()
-        await db.refresh(new_contact)
-        return new_contact
+        try:
+            await db.commit()
+            await db.refresh(new_contact)
+            return new_contact
+        except IntegrityError:
+            await db.rollback()
+            existing = await self.get_by_phone(db, clinic_id, phone_number)
+            if existing:
+                return existing
+            raise

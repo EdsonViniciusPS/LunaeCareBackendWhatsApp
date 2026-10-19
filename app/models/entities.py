@@ -50,6 +50,7 @@ class WhatsAppConversation(Base):
 
     __table_args__ = (
         Index("ix_whatsapp_conversations_clinic_contact", "clinic_id", "contact_id"),
+        Index("uq_whatsapp_conversations_clinic_conn_contact", "clinic_id", "connection_id", "contact_id", unique=True),
     )
 
 
@@ -77,8 +78,19 @@ class WhatsAppMessage(Base):
 
     __table_args__ = (
         Index("ix_whatsapp_messages_clinic_conv", "clinic_id", "conversation_id"),
-        Index("ix_whatsapp_messages_clinic_idemp", "clinic_id", "idempotency_key"),
+        Index("ix_whatsapp_messages_clinic_idemp", "clinic_id", "idempotency_key", unique=True),
     )
+
+    def transition_status_to(self, new_status: str) -> bool:
+        """
+        Avança o status da mensagem de forma estritamente monotônica.
+        Retorna True se o status foi alterado, ou False se a transição foi ignorada.
+        """
+        from app.core.status import should_transition_message_status
+        if should_transition_message_status(self.status, new_status):
+            self.status = new_status
+            return True
+        return False
 
 
 class WhatsAppWebhookEvent(Base):

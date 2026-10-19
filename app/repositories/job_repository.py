@@ -4,6 +4,7 @@ from typing import List, Optional
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.phone import normalize_phone
 from app.models.entities import WhatsAppJob
 
 
@@ -47,6 +48,7 @@ class JobRepository:
     async def get_due_jobs(
         self,
         db: AsyncSession,
+        clinic_id: Optional[str] = None,
         reference_time: Optional[datetime] = None,
         limit: int = 100
     ) -> List[WhatsAppJob]:
@@ -57,9 +59,20 @@ class JobRepository:
                 WhatsAppJob.status == "pending",
                 WhatsAppJob.scheduled_at <= now
             )
-            .order_by(WhatsAppJob.scheduled_at.asc())
-            .limit(limit)
         )
+        if clinic_id:
+            query = query.where(WhatsAppJob.clinic_id == clinic_id)
+
+        query = query.order_by(WhatsAppJob.scheduled_at.asc()).limit(limit)
+
+        # Em PostgreSQL, aplica trava de linha SKIP LOCKED para impedir disputa de concorrência entre múltiplos workers
+        try:
+            bind = db.sync_session.bind
+            if bind and bind.dialect.name == "postgresql":
+                query = query.with_for_update(skip_locked=True)
+        except Exception:
+            pass
+
         result = await db.execute(query)
         return list(result.scalars().all())
 
@@ -95,8 +108,13 @@ class JobRepository:
     ) -> int:
         """
         Cancela jobs pendentes quando um paciente solicita opt-out.
+        Compara o telefone normalizado com 'recipient' e 'phone_number' no payload.
         """
         now = datetime.now(timezone.utc)
+        target_phone = normalize_phone(phone_number)
+        if not target_phone:
+            return 0
+
         query = (
             select(WhatsAppJob)
             .where(
@@ -109,7 +127,8 @@ class JobRepository:
         count = 0
         for job in jobs:
             payload = job.payload or {}
-            if payload.get("phone_number") == phone_number:
+            job_phone = payload.get("recipient") or payload.get("phone_number")
+            if job_phone and normalize_phone(job_phone) == target_phone:
                 job.status = "cancelled"
                 job.finished_at = now
                 job.last_error = "Paciente solicitou opt-out"

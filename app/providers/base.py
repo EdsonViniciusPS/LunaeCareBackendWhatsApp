@@ -58,3 +58,11 @@ class WhatsAppProvider(ABC):
     ) -> Dict[str, Any]:
         """Envia uma mensagem de texto simples."""
         pass
+
+    async def set_webhook(
+        self,
+        instance_name: str,
+        webhook_url: str
+    ) -> Dict[str, Any]:
+        """Configura ou atualiza a URL de webhook para uma instância existente."""
+        return {}

@@ -328,3 +328,196 @@ async def test_due_jobs_processing_and_opt_out(client: AsyncClient):
     # Verifica confirmação de opt-in
     msgs_after = (await client.get(f"/api/v1/whatsapp/conversations/{conv_id}/messages", headers=headers)).json()
     assert any("reativados com sucesso" in m["content"] for m in msgs_after)
+
+
+@pytest.mark.asyncio
+async def test_agenda_event_formatted_phone_and_opt_out(client: AsyncClient):
+    headers = auth("clinica_formatted_phone")
+
+    # 1. Conecta instância
+    conn_res = await client.post("/api/v1/whatsapp/connections", headers=headers, json={})
+    conn_id = conn_res.json()["id"]
+    inst_name = conn_res.json()["provider_instance_id"]
+    webhook_key = derive_webhook_key(inst_name)
+    await client.post(
+        f"/api/v1/whatsapp/webhooks/evolution/{webhook_key}",
+        json={"event": "connection.update", "instance": inst_name, "data": {"state": "open"}}
+    )
+
+    # 2. Cria regras de confirmação e lembrete
+    await client.post(
+        "/api/v1/whatsapp/automations",
+        headers=headers,
+        json={
+            "connection_id": conn_id,
+            "event_trigger": "appointment_created",
+            "template": "Consulta criada para {{patient_name}}."
+        }
+    )
+    await client.post(
+        "/api/v1/whatsapp/automations",
+        headers=headers,
+        json={
+            "connection_id": conn_id,
+            "event_trigger": "appointment_reminder_24h",
+            "template": "Lembrete: consulta hoje.",
+            "settings": {"hours_before": 2}
+        }
+    )
+
+    # 3. Agenda consulta enviando telefone com formatação (+55 (11) 97777-6666)
+    near_time = datetime.now(timezone.utc) + timedelta(hours=1)
+    event_res = await client.post(
+        "/api/v1/whatsapp/automations/agenda-events",
+        headers=headers,
+        json={
+            "event": "appointment.created",
+            "appointment_id": "apt_fmt_001",
+            "patient_name": "Juliana Lima",
+            "phone_number": "+55 (11) 97777-6666",
+            "professional_name": "Dr. Sergio",
+            "appointment_datetime": near_time.isoformat()
+        }
+    )
+    assert event_res.status_code == 200
+
+    # 4. Verifica se a conversa e o contato foram criados com o telefone devidamente normalizado
+    convs = (await client.get("/api/v1/whatsapp/conversations", headers=headers)).json()
+    assert len(convs) == 1
+    assert convs[0]["contact"]["phone_number"] == "5511977776666"
+
+    # 5. Paciente envia opt-out ("PARAR") via WhatsApp
+    optout_webhook = {
+        "event": "messages.upsert",
+        "instance": inst_name,
+        "data": {
+            "key": {
+                "remoteJid": "5511977776666@s.whatsapp.net",
+                "fromMe": False,
+                "id": "MSG_OPTOUT_FMT_001"
+            },
+            "pushName": "Juliana Lima",
+            "message": {
+                "conversation": "PARAR"
+            }
+        }
+    }
+    optout_res = await client.post(
+        f"/api/v1/whatsapp/webhooks/evolution/{webhook_key}",
+        json=optout_webhook
+    )
+    assert optout_res.status_code == 200
+
+    # 6. Executa processamento de jobs pendentes
+    # O job deve ter sido cancelado pelo opt-out imediatamente e não deve enviar lembrete
+    process_res = await client.post(
+        "/api/v1/whatsapp/automations/process-due-jobs",
+        headers=headers
+    )
+    assert process_res.status_code == 200
+    # Verifica que não há novos disparos de lembrete
+    conv_id = convs[0]["id"]
+    msgs = (await client.get(f"/api/v1/whatsapp/conversations/{conv_id}/messages", headers=headers)).json()
+    assert not any("Lembrete: consulta hoje." in m["content"] for m in msgs)
+
+
+@pytest.mark.asyncio
+async def test_process_due_jobs_security_and_scoping(client: AsyncClient):
+    # 1. Requisição sem cabeçalhos de autenticação -> 401
+    unauth_res = await client.post("/api/v1/whatsapp/automations/process-due-jobs")
+    assert unauth_res.status_code == 401
+
+    # 2. Requisição com token interno inválido -> 401
+    bad_token_res = await client.post(
+        "/api/v1/whatsapp/automations/process-due-jobs",
+        headers={"X-Internal-Token": "chave_incorreta_123"}
+    )
+    assert bad_token_res.status_code == 401
+
+    # 3. Cria conexões e regras para Clínica A e Clínica B
+    headers_a = auth("clinica_scoping_a")
+    headers_b = auth("clinica_scoping_b")
+
+    conn_a = (await client.post("/api/v1/whatsapp/connections", headers=headers_a, json={})).json()
+    conn_b = (await client.post("/api/v1/whatsapp/connections", headers=headers_b, json={})).json()
+
+    # Ativa conexões
+    await client.post(
+        f"/api/v1/whatsapp/webhooks/evolution/{derive_webhook_key(conn_a['provider_instance_id'])}",
+        json={"event": "connection.update", "instance": conn_a["provider_instance_id"], "data": {"state": "open"}}
+    )
+    await client.post(
+        f"/api/v1/whatsapp/webhooks/evolution/{derive_webhook_key(conn_b['provider_instance_id'])}",
+        json={"event": "connection.update", "instance": conn_b["provider_instance_id"], "data": {"state": "open"}}
+    )
+
+    # Regras de lembrete
+    await client.post(
+        "/api/v1/whatsapp/automations",
+        headers=headers_a,
+        json={"connection_id": conn_a["id"], "event_trigger": "appointment_reminder_24h", "template": "Lembrete A", "settings": {"hours_before": 2}}
+    )
+    await client.post(
+        "/api/v1/whatsapp/automations",
+        headers=headers_b,
+        json={"connection_id": conn_b["id"], "event_trigger": "appointment_reminder_24h", "template": "Lembrete B", "settings": {"hours_before": 2}}
+    )
+
+    # Agenda lembretes pendentes para ambas
+    near_time = datetime.now(timezone.utc) + timedelta(hours=1)
+    await client.post(
+        "/api/v1/whatsapp/automations/agenda-events",
+        headers=headers_a,
+        json={
+            "event": "appointment.created",
+            "appointment_id": "apt_scope_a",
+            "patient_name": "Paciente A",
+            "phone_number": "5511911110000",
+            "professional_name": "Dr. A",
+            "appointment_datetime": near_time.isoformat()
+        }
+    )
+    await client.post(
+        "/api/v1/whatsapp/automations/agenda-events",
+        headers=headers_b,
+        json={
+            "event": "appointment.created",
+            "appointment_id": "apt_scope_b",
+            "patient_name": "Paciente B",
+            "phone_number": "5511922220000",
+            "professional_name": "Dr. B",
+            "appointment_datetime": near_time.isoformat()
+        }
+    )
+
+    # 4. Clínica A chama /process-due-jobs com seu próprio JWT Bearer
+    # Deve processar APENAS o job da Clínica A, sem tocar no da Clínica B
+    res_a = await client.post("/api/v1/whatsapp/automations/process-due-jobs", headers=headers_a)
+    assert res_a.status_code == 200
+    assert res_a.json()["clinic_id"] == "clinica_scoping_a"
+    assert res_a.json()["processed_count"] == 1
+
+    # Chamada subsequente pela Clínica A não tem mais jobs pendentes para ela
+    res_a_again = await client.post("/api/v1/whatsapp/automations/process-due-jobs", headers=headers_a)
+    assert res_a_again.status_code == 200
+    assert res_a_again.json()["processed_count"] == 0
+
+    # 5. Token interno do microsserviço processa o restante (Clínica B)
+    res_internal = await client.post(
+        "/api/v1/whatsapp/automations/process-due-jobs",
+        headers={"X-Internal-Token": settings.INTERNAL_API_KEY}
+    )
+    assert res_internal.status_code == 200
+    assert res_internal.json()["processed_count"] == 1
+
+
+def test_due_jobs_scheduler_loop_execution():
+    import threading
+    from app.workers.main import run_due_jobs_scheduler_loop
+
+    stop_event = threading.Event()
+    stop_event.set()  # Encerra após o primeiro ciclo
+    # Executa sem exceção
+    run_due_jobs_scheduler_loop(interval_seconds=1, stop_event=stop_event)
+
+

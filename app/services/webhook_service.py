@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.phone import normalize_phone
 from app.core.security import verify_webhook_key
 from app.models.connection import ConnectionStatus, WhatsAppConnection
 from app.models.entities import WhatsAppMessage
@@ -37,6 +38,46 @@ def _extract_text_content(msg: Dict[str, Any]) -> str:
     if isinstance(extended, dict) and "text" in extended:
         return str(extended["text"])
     return ""
+
+
+def _sanitize_audit_payload(full_payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Minimiza os dados armazenados na tabela de auditoria técnica (LGPD).
+    Preserva metadados de protocolo para deduplicação e diagnóstico técnico,
+    removendo textos de saúde sensíveis que já residem de forma controlada em whatsapp_messages.
+    """
+    if not isinstance(full_payload, dict):
+        return {}
+
+    sanitized: Dict[str, Any] = {
+        "event": full_payload.get("event"),
+        "instance": full_payload.get("instance"),
+        "date_time": full_payload.get("date_time"),
+    }
+    data = full_payload.get("data")
+    if isinstance(data, dict):
+        key = data.get("key") or {}
+        sanitized["data"] = {
+            "key": {
+                "id": key.get("id"),
+                "fromMe": key.get("fromMe"),
+                "remoteJid": key.get("remoteJid"),
+            },
+            "status": data.get("status") or data.get("state"),
+            "pushName": data.get("pushName"),
+            "messageType": data.get("messageType") or (list(data.get("message", {}).keys()) if isinstance(data.get("message"), dict) else None),
+            "messageTimestamp": data.get("messageTimestamp"),
+        }
+    elif isinstance(data, list):
+        sanitized["data"] = [
+            {
+                "key": (it.get("key") or {}) if isinstance(it, dict) else {},
+                "status": it.get("status") if isinstance(it, dict) else None,
+                "messageType": it.get("messageType") if isinstance(it, dict) else None,
+            }
+            for it in data if isinstance(it, dict)
+        ]
+    return sanitized
 
 
 class WebhookService:
@@ -139,7 +180,7 @@ class WebhookService:
 
             event_key = f"evolution_upsert_{connection.id}_{provider_msg_id}"
             _, is_new = await self.event_repo.record_event(
-                db, connection.id, event_type, event_key, full_payload
+                db, connection.id, event_type, event_key, _sanitize_audit_payload(full_payload)
             )
             if not is_new:
                 logger.info("Evento duplicado ignorado (idempotência): %s", event_key)
@@ -147,7 +188,7 @@ class WebhookService:
 
             # Apenas mensagens enviadas pelo paciente/contato (inbound) criam conversa/mensagem
             if not from_me:
-                clean_phone = remote_jid.split("@")[0].replace("+", "")
+                clean_phone = normalize_phone(remote_jid)
                 push_name = item.get("pushName")
                 text_content = _extract_text_content(item.get("message") or {})
 
@@ -231,7 +272,7 @@ class WebhookService:
 
             event_key = f"evolution_update_{connection.id}_{provider_msg_id}_{raw_status}"
             _, is_new = await self.event_repo.record_event(
-                db, connection.id, event_type, event_key, full_payload
+                db, connection.id, event_type, event_key, _sanitize_audit_payload(full_payload)
             )
             if not is_new:
                 continue
@@ -240,12 +281,21 @@ class WebhookService:
             if message:
                 now = datetime.now(timezone.utc)
                 if raw_status in ("DELIVERY_ACK", "DELIVERED"):
-                    message.status = "delivered"
-                    message.delivered_at = now
+                    if not message.delivered_at:
+                        message.delivered_at = now
+                    if message.transition_status_to("delivered"):
+                        logger.info("Mensagem %s marcada como entregue.", message.id)
+                    else:
+                        logger.info("Ignorando regressão de status para mensagem %s (atual: %s, recebido: %s)", message.id, message.status, raw_status)
                     await self.message_repo.update(db, message)
-                    logger.info("Mensagem %s marcada como entregue.", message.id)
                 elif raw_status in ("READ", "PLAYED"):
-                    message.status = "read"
+                    if not message.delivered_at:
+                        message.delivered_at = now
                     message.read_at = now
+                    if message.transition_status_to("read"):
+                        logger.info("Mensagem %s marcada como lida.", message.id)
                     await self.message_repo.update(db, message)
-                    logger.info("Mensagem %s marcada como lida.", message.id)
+                elif raw_status in ("ERROR", "FAILED"):
+                    if message.transition_status_to("failed"):
+                        logger.info("Mensagem %s marcada como falha.", message.id)
+                    await self.message_repo.update(db, message)

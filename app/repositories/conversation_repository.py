@@ -8,6 +8,9 @@ from sqlalchemy.orm import selectinload
 from app.models.entities import WhatsAppConversation
 
 
+from sqlalchemy.exc import IntegrityError
+
+
 class ConversationRepository:
     """
     Repositório para conversas WhatsApp com isolamento multi-tenant estrito por clínica.
@@ -74,10 +77,19 @@ class ConversationRepository:
             updated_at=now
         )
         db.add(new_conv)
-        await db.commit()
-        await db.refresh(new_conv)
-        # Recarrega com relationship
-        return await self.get_by_id(db, new_conv.id, clinic_id) or new_conv
+        try:
+            await db.commit()
+            await db.refresh(new_conv)
+            # Recarrega com relationship
+            return await self.get_by_id(db, new_conv.id, clinic_id) or new_conv
+        except IntegrityError:
+            await db.rollback()
+            existing = await self.get_by_contact_and_connection(
+                db, clinic_id, connection_id, contact_id
+            )
+            if existing:
+                return existing
+            raise
 
     async def list_by_clinic(
         self,

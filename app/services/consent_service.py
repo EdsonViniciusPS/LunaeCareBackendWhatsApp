@@ -78,9 +78,10 @@ class ConsentService:
                 source="whatsapp_inbound"
             )
             cancelled = await self.job_repo.cancel_jobs_for_phone(db, clinic_id, contact.phone_number)
+            masked_phone = f"***{contact.phone_number[-4:]}" if contact.phone_number and len(contact.phone_number) >= 4 else "***"
             logger.info(
                 "Paciente %s (%s) solicitou opt-out na clínica %s. %d lembretes pendentes cancelados.",
-                contact.id, contact.phone_number, clinic_id, cancelled
+                contact.id, masked_phone, clinic_id, cancelled
             )
             response_msg = (
                 "Você não receberá mais lembretes e mensagens automáticas por este canal. "
@@ -96,7 +97,8 @@ class ConsentService:
                 consent_status="opted_in",
                 source="whatsapp_inbound"
             )
-            logger.info("Paciente %s (%s) reativou notificações (opt-in) na clínica %s.", contact.id, contact.phone_number, clinic_id)
+            masked_phone = f"***{contact.phone_number[-4:]}" if contact.phone_number and len(contact.phone_number) >= 4 else "***"
+            logger.info("Paciente %s (%s) reativou notificações (opt-in) na clínica %s.", contact.id, masked_phone, clinic_id)
             response_msg = "Suas notificações e lembretes de consultas foram reativados com sucesso!"
             return True, response_msg
 
