@@ -3,10 +3,9 @@ import time
 from collections import defaultdict
 from typing import Optional
 from fastapi import HTTPException, Request, Response, status
-from redis import Redis
+import redis.asyncio as aioredis
 
 from app.core.config import settings
-from app.core.tenancy import TenantContext
 
 logger = logging.getLogger(__name__)
 
@@ -19,25 +18,26 @@ class RateLimiter:
     """
     Controlador de taxa de requisições por clínica (Sliding Window).
     Protege a API contra abusos e previne banimento de contas WhatsApp por disparos em massa.
+    Utiliza redis.asyncio para operações assíncronas não-bloqueantes.
     """
 
     def __init__(self, times: int = 60, seconds: int = 60, key_prefix: str = "rate"):
         self.times = times
         self.seconds = seconds
         self.key_prefix = key_prefix
-        self._redis_client: Optional[Redis] = None
+        self._redis_client: Optional[aioredis.Redis] = None
 
-    def _get_redis(self) -> Optional[Redis]:
+    async def _get_redis(self) -> Optional[aioredis.Redis]:
         global _redis_offline_until
         now = time.time()
         if now < _redis_offline_until:
             return None
         try:
             if not self._redis_client:
-                self._redis_client = Redis.from_url(
+                self._redis_client = aioredis.from_url(
                     settings.REDIS_URL, socket_connect_timeout=0.1, socket_timeout=0.1
                 )
-            self._redis_client.ping()
+            await self._redis_client.ping()
             return self._redis_client
         except Exception:
             _redis_offline_until = now + 5.0
@@ -59,16 +59,16 @@ class RateLimiter:
         rate_key = f"{self.key_prefix}:{key_id}"
         now = time.time()
 
-        r = self._get_redis()
+        r = await self._get_redis()
         if r:
-            # Implementação Redis Sliding Window com Sorted Set
+            # Implementação Redis Sliding Window com Sorted Set assíncrono
             try:
-                pipeline = r.pipeline()
-                pipeline.zremrangebyscore(rate_key, 0, now - self.seconds)
-                pipeline.zadd(rate_key, {str(now): now})
-                pipeline.zcard(rate_key)
-                pipeline.expire(rate_key, self.seconds)
-                results = pipeline.execute()
+                pipe = r.pipeline()
+                pipe.zremrangebyscore(rate_key, 0, now - self.seconds)
+                pipe.zadd(rate_key, {str(now): now})
+                pipe.zcard(rate_key)
+                pipe.expire(rate_key, int(self.seconds))
+                results = await pipe.execute()
                 current_count = results[2]
                 remaining = max(0, self.times - current_count)
 

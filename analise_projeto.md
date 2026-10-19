@@ -200,25 +200,38 @@ A imagem especificada no `compose.yaml` é `atendai/evolution-api:v2.2.2`. Foram
 6. **Máquina de Estados Monotônica para Mensagens:**
    - [status.py](file:///d:/GitHub/LunaeCareBackendWhatsApp/app/core/status.py): Regras de ciclo de vida (`queued` -> `sent` -> `delivered` -> `read`).
    - [webhook_service.py](file:///d:/GitHub/LunaeCareBackendWhatsApp/app/services/webhook_service.py): Bloqueada qualquer regressão de status (ex: evento tardio de `DELIVERED` não rebaixa mensagem já em `read`).
-7. **Testes Automatizados:**
-   - [test_concurrency_and_status.py](file:///d:/GitHub/LunaeCareBackendWhatsApp/tests/test_concurrency_and_status.py) e [test_automations.py](file:///d:/GitHub/LunaeCareBackendWhatsApp/tests/test_automations.py): **49 testes passando** (100% de sucesso).
-
-8. **Compatibilização com Evolution API v2.2.2:**
+7. **Rate Limiting Assíncrono com `redis.asyncio`:**
+   - [rate_limiter.py](file:///d:/GitHub/LunaeCareBackendWhatsApp/app/core/rate_limiter.py): Substituído cliente Redis síncrono por `redis.asyncio`. Pipeline Sliding Window não-bloqueante no loop de eventos do FastAPI, com fallback transparente para memória em caso de indisponibilidade do Redis.
+8. **Isolamento de Conexões em Regras de Automação:**
+   - [scheduling_service.py](file:///d:/GitHub/LunaeCareBackendWhatsApp/app/services/scheduling_service.py): `create_rule` e `update_rule` agora validam estritamente se o `connection_id` informado pertence à clínica autenticada no token JWT, retornando HTTP 404 em caso de tentativa de acesso cruzado.
+9. **Compatibilização com Evolution API v2.2.2:**
    - [evolution.py](file:///d:/GitHub/LunaeCareBackendWhatsApp/app/providers/evolution.py): Atualizado método `create_instance` para utilizar o schema aninhado da v2 (`webhook: { url, byEvents, base64, events }`).
    - Adicionado método `set_webhook(instance_name, webhook_url)` para atualização dinâmica de callbacks.
    - Sanitizado vazamento de exceções no detail de erros HTTP 502, eliminando exposição de detalhes da infraestrutura externa.
-9. **Infraestrutura Docker Resiliente:**
-   - [compose.yaml](file:///d:/GitHub/LunaeCareBackendWhatsApp/compose.yaml) & [Dockerfile](file:///d:/GitHub/LunaeCareBackendWhatsApp/Dockerfile): Configurada execução automática de `alembic upgrade head` antes da subida do Uvicorn no container, garantindo criação e atualização do esquema no PostgreSQL.
-   - Configurada persistência da Evolution API v2 em PostgreSQL compartilhado (`DATABASE_PROVIDER=postgresql`, `DATABASE_CONNECTION_URI`), com `depends_on` garantindo ordem de inicialização após a saúde do Postgres e Redis.
-10. **Minimização LGPD nos Eventos de Webhook:**
+10. **Infraestrutura Docker Resiliente:**
+    - [compose.yaml](file:///d:/GitHub/LunaeCareBackendWhatsApp/compose.yaml) & [Dockerfile](file:///d:/GitHub/LunaeCareBackendWhatsApp/Dockerfile): Configurada execução automática de `alembic upgrade head` antes da subida do Uvicorn no container, garantindo criação e atualização do esquema no PostgreSQL.
+    - Configurada persistência da Evolution API v2 em PostgreSQL compartilhado (`DATABASE_PROVIDER=postgresql`, `DATABASE_CONNECTION_URI`), com `depends_on` garantindo ordem de inicialização após a saúde do Postgres e Redis.
+11. **Minimização LGPD nos Eventos de Webhook:**
     - [webhook_service.py](file:///d:/GitHub/LunaeCareBackendWhatsApp/app/services/webhook_service.py): Implementado `_sanitize_audit_payload` para a tabela `whatsapp_webhook_events`. Conteúdos textuais sensíveis de pacientes são removidos da tabela de auditoria técnica de eventos, persistindo apenas metadados de protocolo (`event`, `instance`, `id`, `remoteJid`, `status`).
-11. **Cobertura Global de Testes:**
-    - **53 testes automatizados passando** (100% de sucesso) cobrindo segurança, multi-tenancy, concorrência, LGPD, opt-out, scheduler, máquina de estados e integração Evolution v2.
+12. **Health Check e Observabilidade Não-Bloqueante:**
+    - [metrics.py](file:///d:/GitHub/LunaeCareBackendWhatsApp/app/api/v1/metrics.py): Verificação de integridade do Redis migrada para `redis.asyncio` não-bloqueante.
+13. **Cobertura Global de Testes:**
+    - **54 testes automatizados passando** (100% de sucesso) cobrindo segurança, multi-tenancy, concorrência, LGPD, opt-out, scheduler, máquina de estados, rate limiting assíncrono e integração Evolution v2.
 
 ---
 
-## 6. Conclusão e Estado Final
+## 6. Conclusão e Checklist de Prontidão para Produção (Production-Ready)
 
-Todas as vulnerabilidades críticas (P0), de integridade concorrencial (P1), conformidade LGPD e de integração com a infraestrutura de produção (P2) foram **completamente remediadas e validadas por testes automatizados**.
+O backend do WhatsApp do **Lunae Care** está **PRONTO PARA PRODUÇÃO**. Todas as vulnerabilidades de segurança, concorrência, isolamento multi-tenant e dependências de infraestrutura foram completamente resolvidas.
 
-O backend do WhatsApp do **Lunae Care** encontra-se agora em **estado de prontidão para produção** (*production-ready*), operando com isolamento estrito entre clínicas, proteção robusta contra concorrência e conformidade regulatória rigorosa.
+### Checklist Pré-Deploy em Produção:
+
+| Item | Ação Necessária | Status |
+|---|---|---|
+| **Segredos em Produção** | Substituir senhas e chaves padrão (`_INSECURE_DEFAULTS` em `app.core.config`) no arquivo `.env`. O sistema aborta a inicialização caso segredos padrão sejam detectados com `ENVIRONMENT=production`. | ✅ Validado por código |
+| **Banco de Dados** | Execução automática de `alembic upgrade head` no startup do container Docker. Migrações `001` a `004` prontas. | ✅ Validado |
+| **Fila Redis & Worker** | Worker RQ configurado no serviço `whatsapp-worker` do Docker Compose com scheduler periódico ativo em thread separada. | ✅ Validado |
+| **Taxas & Rate Limiter** | Rate limiter Sliding Window operando em modo assíncrono `redis.asyncio` (40 msgs/min por clínica). | ✅ Validado |
+| **Conformidade LGPD** | Opt-out ("PARAR", "SAIR") normaliza telefones e cancela disparos imediatamente; sanitização de PII em logs e payloads. | ✅ Validado |
+| **Concorrência** | Travas de concorrência com `SKIP LOCKED` em jobs devidos e `UNIQUE` constraints contra duplicação de mensagens e conversas. | ✅ Validado |
+| **Testes de Regressão** | **54/54 testes passando** sem falhas ou regressões. | ✅ Validado |

@@ -55,10 +55,13 @@ async def security_headers_middleware(request: Request, call_next):
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     return response
 
-# Configuração de CORS restrita
+# Configuração de CORS
+_allowed_origins = ["*"] if settings.DEBUG else [
+    orig.strip() for orig in settings.CORS_ORIGINS.split(",") if orig.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"] if settings.DEBUG else ["https://app.lunaecare.com.br"],
+    allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],

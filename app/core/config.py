@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     DEBUG: bool = True
     PORT: int = 8000
     HOST: str = "0.0.0.0"
+    CORS_ORIGINS: str = "https://app.lunaecare.com.br"
 
     # Segurança e Autenticação
     INTERNAL_API_KEY: str = "lunae_internal_secret_change_me"

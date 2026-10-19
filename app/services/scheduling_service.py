@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.phone import normalize_phone
 from app.models.entities import WhatsAppAutomationRule, WhatsAppJob
 from app.repositories.automation_repository import AutomationRepository
+from app.repositories.connection_repository import ConnectionRepository
 from app.repositories.contact_repository import ContactRepository
 from app.repositories.job_repository import JobRepository
 from app.schemas.automation import (
@@ -46,12 +47,16 @@ class SchedulingService:
         contact_repo: ContactRepository,
         consent_service: ConsentService,
         messaging_service: MessagingService,
+        connection_repo: Optional[ConnectionRepository] = None,
     ):
         self.automation_repo = automation_repo
         self.job_repo = job_repo
         self.contact_repo = contact_repo
         self.consent_service = consent_service
         self.messaging_service = messaging_service
+        self.connection_repo = connection_repo or (
+            getattr(messaging_service, "connection_repo", None) or ConnectionRepository()
+        )
 
     async def create_rule(
         self,
@@ -59,6 +64,13 @@ class SchedulingService:
         clinic_id: str,
         data: AutomationRuleCreate
     ) -> WhatsAppAutomationRule:
+        connection = await self.connection_repo.get_by_id(db, data.connection_id, clinic_id)
+        if not connection:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Conexão não encontrada para esta clínica."
+            )
+
         rule = WhatsAppAutomationRule(
             id=str(uuid.uuid4()),
             clinic_id=clinic_id,
@@ -102,6 +114,12 @@ class SchedulingService:
     ) -> WhatsAppAutomationRule:
         rule = await self.get_rule(db, clinic_id, rule_id)
         if data.connection_id is not None:
+            connection = await self.connection_repo.get_by_id(db, data.connection_id, clinic_id)
+            if not connection:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Conexão não encontrada para esta clínica."
+                )
             rule.connection_id = data.connection_id
         if data.event_trigger is not None:
             rule.event_trigger = data.event_trigger

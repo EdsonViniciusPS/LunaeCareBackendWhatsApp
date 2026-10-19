@@ -2,15 +2,16 @@ services:
   lunaecare-whatsapp:
     build: .
     restart: unless-stopped
-    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers $${WEB_CONCURRENCY:-2}"
     env_file:
       - .env
     environment:
-      - DATABASE_URL=postgresql+asyncpg://lunae_user:lunae_password@whatsapp-db:5432/lunaecare_whatsapp
-      - REDIS_URL=redis://whatsapp-redis:6379/0
-      - EVOLUTION_API_URL=http://evolution-api:8080
+      - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://${POSTGRES_USER:-lunae_user}:${POSTGRES_PASSWORD:-lunae_password}@whatsapp-db:5432/${POSTGRES_DB:-lunaecare_whatsapp}}
+      - DATABASE_SYNC_URL=${DATABASE_SYNC_URL:-postgresql+psycopg2://${POSTGRES_USER:-lunae_user}:${POSTGRES_PASSWORD:-lunae_password}@whatsapp-db:5432/${POSTGRES_DB:-lunaecare_whatsapp}}
+      - REDIS_URL=${REDIS_URL:-redis://whatsapp-redis:6379/0}
+      - EVOLUTION_API_URL=${EVOLUTION_API_URL:-http://evolution-api:8080}
     ports:
-      - "8000:8000"
+      - "${API_BIND_ADDRESS:-127.0.0.1}:${PORT:-8000}:8000"
     networks:
       - whatsapp-internal
     depends_on:
@@ -18,6 +19,11 @@ services:
         condition: service_healthy
       whatsapp-redis:
         condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
 
   whatsapp-worker:
     build: .
@@ -26,9 +32,10 @@ services:
     env_file:
       - .env
     environment:
-      - DATABASE_URL=postgresql+asyncpg://lunae_user:lunae_password@whatsapp-db:5432/lunaecare_whatsapp
-      - REDIS_URL=redis://whatsapp-redis:6379/0
-      - EVOLUTION_API_URL=http://evolution-api:8080
+      - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://${POSTGRES_USER:-lunae_user}:${POSTGRES_PASSWORD:-lunae_password}@whatsapp-db:5432/${POSTGRES_DB:-lunaecare_whatsapp}}
+      - DATABASE_SYNC_URL=${DATABASE_SYNC_URL:-postgresql+psycopg2://${POSTGRES_USER:-lunae_user}:${POSTGRES_PASSWORD:-lunae_password}@whatsapp-db:5432/${POSTGRES_DB:-lunaecare_whatsapp}}
+      - REDIS_URL=${REDIS_URL:-redis://whatsapp-redis:6379/0}
+      - EVOLUTION_API_URL=${EVOLUTION_API_URL:-http://evolution-api:8080}
     networks:
       - whatsapp-internal
     depends_on:
@@ -38,23 +45,33 @@ services:
         condition: service_healthy
       lunaecare-whatsapp:
         condition: service_started
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
 
   whatsapp-db:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: lunae_user
-      POSTGRES_PASSWORD: lunae_password
-      POSTGRES_DB: lunaecare_whatsapp
+      POSTGRES_USER: ${POSTGRES_USER:-lunae_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lunae_password}
+      POSTGRES_DB: ${POSTGRES_DB:-lunaecare_whatsapp}
     volumes:
       - whatsapp_db_data:/var/lib/postgresql/data
     networks:
       - whatsapp-internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U lunae_user -d lunaecare_whatsapp"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-lunae_user} -d $${POSTGRES_DB:-lunaecare_whatsapp}"]
       interval: 10s
       timeout: 3s
       retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
 
   whatsapp-redis:
     image: redis:7-alpine
@@ -69,15 +86,20 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
 
   evolution-api:
     image: atendai/evolution-api:v2.2.2
     restart: unless-stopped
     environment:
       - SERVER_PORT=8080
-      - AUTHENTICATION_API_KEY=evolution_global_api_key_change_me
+      - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY:-evolution_global_api_key_change_me}
       - DATABASE_PROVIDER=postgresql
-      - DATABASE_CONNECTION_URI=postgresql://lunae_user:lunae_password@whatsapp-db:5432/lunaecare_whatsapp
+      - DATABASE_CONNECTION_URI=postgresql://${POSTGRES_USER:-lunae_user}:${POSTGRES_PASSWORD:-lunae_password}@whatsapp-db:5432/${POSTGRES_DB:-lunaecare_whatsapp}
       - DATABASE_CONNECTION_CLIENT_NAME=evolution_v2
       - CACHE_REDIS_ENABLED=true
       - CACHE_REDIS_URI=redis://whatsapp-redis:6379/1
@@ -92,6 +114,11 @@ services:
         condition: service_healthy
     expose:
       - "8080"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
 
 volumes:
   whatsapp_db_data:

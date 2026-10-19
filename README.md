@@ -113,7 +113,7 @@ Copie o arquivo `.env.example` para `.env`:
 cp .env.example .env
 ```
 
-### 3. Executar a suíte de testes automatizados (42 testes)
+### 3. Executar a suíte de testes automatizados (54 testes)
 
 ```powershell
 pytest -v
@@ -131,28 +131,52 @@ uvicorn app.main:app --reload --port 8000
 
 ---
 
+## 🚀 Deploy em Produção (VPS Hostinger Ubuntu)
+
+📖 **[Guia Rápido Passo a Passo (Receita Prática)](GUIA_RAPIDO_VPS_HOSTINGER.md)**  
+📘 **[Manual Completo e Detalhado de Arquitetura e Deploy](DEPLOY_HOSTINGER_UBUNTU.md)**
+
+### Scripts de Automação para Ubuntu:
+- **`scripts/generate_env.sh`**: Criação guiada e segura do arquivo `.env` com geração automática de chaves fortes.
+- **`scripts/setup_vps.sh`**: Provisionamento do servidor (Swap 2GB, Docker Oficial, Firewall UFW, Fail2ban, Nginx e Certbot).
+- **`scripts/deploy.sh`**: Deploy e atualização com zero downtime, validação do `.env`, build e healthcheck automático.
+- **`scripts/backup.sh`**: Backup automatizado com compressão gzip do PostgreSQL e volume da Evolution API + rotação de 14 dias.
+- **`scripts/restore.sh`**: Restauração segura com confirmação prévia para proteção contra perda acidental.
+- **`scripts/systemd/lunaecare-whatsapp.service`**: Inicialização automática da stack Docker no boot da VPS.
+- **`nginx/lunaecare-whatsapp.conf`**: Configuração reversa Nginx otimizada com SSL Let's Encrypt, HTTP/2, HSTS e rate limiting.
+
+---
+
 ## 🔒 Segurança, Privacidade e LGPD em Produção
 
 1. **Isolamento Multi-tenant Estrito:** Derivado exclusivamente do claim `clinic_id` do JWT Bearer validado criptograficamente com HMAC-SHA256. Qualquer identificador informado externamente por headers ou query é ignorado.
-2. **Criptografia em Repouso:** Tokens e credenciais das instâncias do WhatsApp são armazenados com criptografia autenticada AES-256-GCM. A chave de criptografia é mantida fora do banco de dados via variável de ambiente `ENCRYPTION_KEY`.
+2. **Criptografia em Repouso:** Tokens e credenciais das instâncias do WhatsApp são armazenados com criptografia simétrica (Fernet com derivação SHA-256). A chave de criptografia é mantida fora do banco de dados via variável de ambiente `ENCRYPTION_KEY`.
 3. **Webhooks com HMAC Exclusivo:** Cada instância possui uma URL exclusiva com chave derivada via HMAC-SHA256 (`/webhooks/evolution/{provider_key}`). Tentativas com chaves inválidas retornam `403` de forma unificada para prevenir ataques de enumeração.
 4. **Idempotência Garantida:**
-   - Envio de mensagens suporta o cabeçalho `X-Idempotency-Key` ou parâmetro `idempotency_key`.
+   - Envio de mensagens suporta o cabeçalho `X-Idempotency-Key` ou parâmetro `idempotency_key` com restrição `UNIQUE` no banco.
    - Webhooks recebidos são deduplicados através de chave única estável persistida em `whatsapp_webhook_events`.
-5. **Rate Limiting Anti-Ban:** Controlador de taxa por janela deslizante (Sliding Window) limitando requisições e disparos de mensagens por clínica para evitar sobrecarga e banimento no WhatsApp.
-6. **Sanitização de Logs:** O filtro `SensitiveDataSanitizerFilter` intercepta os logs da aplicação e mascara automaticamente dados sensíveis, tokens JWT, senhas e representações base64 de QR Codes.
-7. **Rede Docker Privada:** No `compose.yaml`, portas internas da Evolution API, Redis e PostgreSQL não são publicadas publicamente para a Internet, permanecendo isoladas na rede bridge `whatsapp-internal`.
+5. **Rate Limiting Anti-Ban:** Controlador de taxa por janela deslizante (Sliding Window via `redis.asyncio` não-bloqueante) limitando requisições e disparos por clínica.
+6. **Sanitização de Logs:** O filtro `SensitiveDataSanitizerFilter` intercepta os logs da aplicação e mascara automaticamente dados sensíveis, tokens JWT, senhas e representações base64 de QR Codes. Minimização de dados médicos nos logs de webhooks.
+7. **Rede Docker Privada e Borda Segura:** No `compose.yaml`, portas internas da Evolution API, Redis e PostgreSQL não são publicadas publicamente para a Internet. A API FastAPI fica amarrada em `127.0.0.1:8000` acessível apenas pelo Nginx reverso com HTTPS.
 
 ---
 
 ## 💾 Backup e Restauração do Banco de Dados
 
-### Gerar Backup
-```powershell
-.\scripts\backup.ps1 -ContainerName "whatsapp-db" -Database "lunaecare_whatsapp"
+### No Linux / Ubuntu (Hostinger VPS):
+```bash
+# Gerar backup
+bash scripts/backup.sh
+
+# Restaurar backup
+bash scripts/restore.sh backups/backup_lunaecare_whatsapp_YYYYMMDD_HHMMSS.sql.gz
 ```
 
-### Restaurar Backup em Ambiente de Teste
+### No Windows / PowerShell (Ambiente de Desenvolvimento):
 ```powershell
+# Gerar backup
+.\scripts\backup.ps1 -ContainerName "whatsapp-db" -Database "lunaecare_whatsapp"
+
+# Restaurar backup
 .\scripts\restore.ps1 -BackupFile "backups\backup_lunaecare_whatsapp_20261018_233000.sql.gz"
 ```

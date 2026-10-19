@@ -521,3 +521,47 @@ def test_due_jobs_scheduler_loop_execution():
     run_due_jobs_scheduler_loop(interval_seconds=1, stop_event=stop_event)
 
 
+@pytest.mark.asyncio
+async def test_cross_clinic_connection_in_automation_rule_rejected(client: AsyncClient):
+    headers_a = auth("clinica_rule_conn_a")
+    headers_b = auth("clinica_rule_conn_b")
+
+    # 1. Cria conexão para a Clínica A
+    conn_a = await client.post("/api/v1/whatsapp/connections", headers=headers_a, json={})
+    conn_a_id = conn_a.json()["id"]
+
+    # 2. Clínica B tenta criar regra usando o connection_id da Clínica A -> 404
+    payload_cross = {
+        "connection_id": conn_a_id,
+        "event_trigger": "appointment_created",
+        "template": "Olá {{patient_name}}",
+        "enabled": 1,
+    }
+    res_cross = await client.post("/api/v1/whatsapp/automations", headers=headers_b, json=payload_cross)
+    assert res_cross.status_code == 404
+    assert "Conexão não encontrada" in res_cross.json()["detail"]
+
+    # 3. Clínica B cria sua própria conexão e regra válida
+    conn_b = await client.post("/api/v1/whatsapp/connections", headers=headers_b, json={})
+    conn_b_id = conn_b.json()["id"]
+    payload_valid = {
+        "connection_id": conn_b_id,
+        "event_trigger": "appointment_created",
+        "template": "Olá {{patient_name}}",
+        "enabled": 1,
+    }
+    res_valid = await client.post("/api/v1/whatsapp/automations", headers=headers_b, json=payload_valid)
+    assert res_valid.status_code == 201
+    rule_id = res_valid.json()["id"]
+
+    # 4. Clínica B tenta atualizar a regra para apontar para a conexão da Clínica A -> 404
+    res_update_cross = await client.put(
+        f"/api/v1/whatsapp/automations/{rule_id}",
+        headers=headers_b,
+        json={"connection_id": conn_a_id}
+    )
+    assert res_update_cross.status_code == 404
+    assert "Conexão não encontrada" in res_update_cross.json()["detail"]
+
+
+

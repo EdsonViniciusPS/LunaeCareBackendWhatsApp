@@ -3,7 +3,7 @@ from typing import Any, Dict
 from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from redis import Redis
+import redis.asyncio as aioredis
 
 from app.core.config import settings
 from app.core.database import get_db
@@ -124,8 +124,9 @@ async def get_system_health(db: AsyncSession = Depends(get_db)) -> Dict[str, Any
     # 2. Testa Redis
     redis_ok = False
     try:
-        r = Redis.from_url(settings.REDIS_URL, socket_connect_timeout=0.1, socket_timeout=0.1)
-        r.ping()
+        r = aioredis.from_url(settings.REDIS_URL, socket_connect_timeout=0.1, socket_timeout=0.1)
+        await r.ping()
+        await r.aclose()
         redis_ok = True
     except Exception:
         pass
