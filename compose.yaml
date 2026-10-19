@@ -1,0 +1,93 @@
+services:
+  lunaecare-whatsapp:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://lunae_user:lunae_password@whatsapp-db:5432/lunaecare_whatsapp
+      - REDIS_URL=redis://whatsapp-redis:6379/0
+      - EVOLUTION_API_URL=http://evolution-api:8080
+    ports:
+      - "8000:8000"
+    networks:
+      - whatsapp-internal
+    depends_on:
+      whatsapp-db:
+        condition: service_healthy
+      whatsapp-redis:
+        condition: service_healthy
+
+  whatsapp-worker:
+    build: .
+    restart: unless-stopped
+    command: ["python", "-m", "app.workers.main"]
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://lunae_user:lunae_password@whatsapp-db:5432/lunaecare_whatsapp
+      - REDIS_URL=redis://whatsapp-redis:6379/0
+      - EVOLUTION_API_URL=http://evolution-api:8080
+    networks:
+      - whatsapp-internal
+    depends_on:
+      whatsapp-db:
+        condition: service_healthy
+      whatsapp-redis:
+        condition: service_healthy
+
+  whatsapp-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: lunae_user
+      POSTGRES_PASSWORD: lunae_password
+      POSTGRES_DB: lunaecare_whatsapp
+    volumes:
+      - whatsapp_db_data:/var/lib/postgresql/data
+    networks:
+      - whatsapp-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lunae_user -d lunaecare_whatsapp"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  whatsapp-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - whatsapp_redis_data:/data
+    networks:
+      - whatsapp-internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  evolution-api:
+    image: atendai/evolution-api:v2.2.2
+    restart: unless-stopped
+    environment:
+      - SERVER_PORT=8080
+      - AUTHENTICATION_API_KEY=evolution_global_api_key_change_me
+      - DATABASE_PROVIDER=local
+      - CACHE_REDIS_ENABLED=true
+      - CACHE_REDIS_URI=redis://whatsapp-redis:6379/1
+    volumes:
+      - evolution_instances_data:/evolution/instances
+    networks:
+      - whatsapp-internal
+    expose:
+      - "8080"
+
+volumes:
+  whatsapp_db_data:
+  whatsapp_redis_data:
+  evolution_instances_data:
+
+networks:
+  whatsapp-internal:
+    driver: bridge
