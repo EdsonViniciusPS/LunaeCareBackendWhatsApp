@@ -29,6 +29,8 @@ services:
     build: .
     restart: unless-stopped
     command: ["python", "-m", "app.workers.main"]
+    healthcheck:
+      disable: true
     env_file:
       - .env
     environment:
